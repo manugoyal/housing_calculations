@@ -12,6 +12,7 @@ MarketParams = namedtuple(
         'property_tax_percentage_annual',
         'stock_market_growth_percentage_annual',
         'capital_gains_rate_percentage',
+        'home_profit_tax_exclusion_amount',
     ])
 
 # These paramaters pertain to a particular loan structure.
@@ -19,6 +20,7 @@ LoanParams = namedtuple(
     'LoanParams',
     [
         'downpayment_percentage',
+        'maximum_loan_amount',
         'loan_period_months',
         'interest_rate_percentage_annual',
     ])

@@ -1,8 +1,10 @@
 # Utilities for estimating costs of buying vs renting a home. The bottom-line
 # function is at the bottom.
 
-from collections import namedtuple
 import itertools
+import params
+
+from collections import namedtuple
 
 MortgagePayment = namedtuple(
     'MortgagePayment',
@@ -12,7 +14,9 @@ MortgagePayment = namedtuple(
     ])
 
 def get_loan_amount(loan_params, home_params):
-    return (1 - loan_params.downpayment_percentage/100) * home_params.home_value
+    return min(
+        loan_params.maximum_loan_amount,
+        (1 - loan_params.downpayment_percentage/100) * home_params.home_value)
 
 def get_mortgage_payments(market_params, loan_params, home_params):
     # Generator for mortgage payments. After the mortgage is paid off, returns
@@ -41,7 +45,7 @@ def appreciation_annual_to_monthly(annual_percentage):
 def get_initial_payment(market_params, loan_params, home_params):
     # Compute the initial payment for a particular home.
 
-    downpayment_amount = loan_params.downpayment_percentage/100 * home_params.home_value
+    downpayment_amount = home_params.home_value - get_loan_amount(loan_params, home_params)
     buyers_fee = market_params.buyers_fee_percentage/100 * home_params.home_value
     return downpayment_amount + buyers_fee
 
@@ -53,12 +57,15 @@ def tax_adjusted_nonmortgage_monthly_payment(
 
     property_tax = (market_params.property_tax_percentage_annual/100/12 *
                     home_params.home_value)
+    tax_deductable_property_tax = min(property_tax, 10000/12)
+    remaining_property_tax = property_tax - tax_deductable_property_tax
     home_insurance = (home_class_params.home_insurance_percentage_annual/100/12 *
                       home_params.home_value)
     maintenance = home_class_params.home_maintenance_annual/12
     hoa = home_params.hoa_monthly
-    return (home_insurance + maintenance + hoa +
-            property_tax * (1 - market_params.marginal_tax_rate_percentage/100))
+    return (home_insurance + maintenance + hoa + remaining_property_tax +
+            tax_deductable_property_tax *
+                (1 - market_params.marginal_tax_rate_percentage/100))
 
 def tax_adjusted_monthly_payments(
     market_params, loan_params, home_class_params, home_params):
@@ -67,13 +74,26 @@ def tax_adjusted_monthly_payments(
     # payment.
 
     mortgage_payments = get_mortgage_payments(market_params, loan_params, home_params)
+    indebtedness = get_loan_amount(loan_params, home_params)
     for mortgage_payment in mortgage_payments:
+        # Your interest payment is tax deductable up to 750000 of total
+        # indebtedness. So we compute the fraction of current indebtedness that
+        # 750000 comprises, and split your interest along that fraction.
+        if indebtedness > 0:
+            interest_deductible_fraction = min(750000/indebtedness, 1.0)
+        else:
+            interest_deductible_fraction = 1.0
+        tax_deductable_interest = \
+            mortgage_payment.interest * interest_deductible_fraction
+        remaining_interest = mortgage_payment.interest - tax_deductable_interest
         yield (
             mortgage_payment.principal +
             tax_adjusted_nonmortgage_monthly_payment(
                 market_params, loan_params, home_class_params, home_params) +
-            mortgage_payment.interest *
-                (1 - market_params.marginal_tax_rate_percentage/100))
+            tax_deductable_interest *
+                (1 - market_params.marginal_tax_rate_percentage/100) +
+            remaining_interest)
+        indebtedness = max(0, indebtedness - mortgage_payment.principal)
 
 def get_total_home_payment(
     market_params, loan_params, home_class_params, home_params, sell_month):
@@ -110,16 +130,24 @@ def get_sellers_fee(market_params, home_params, sell_month):
 def net_profit_home_scenario(market_params, loan_params, home_class_params,
                              home_params, sell_month):
     # Compute the net profit for buying a home, if it is sold on |sell_month|.
-    # This is computed by deducting the total home payment and sellers fee from
-    # the total home sale price.
+    # This is computed by computing the profit on the home investment (home
+    # sale price - total home payment) and then subtracting the sellers fee.
 
     total_home_payment = get_total_home_payment(
         market_params, loan_params, home_class_params, home_params, sell_month)
     sellers_fee = get_sellers_fee(market_params, home_params, sell_month)
     home_sale_price = get_home_sale_price(market_params, home_params, sell_month)
-    home_profit = ((home_sale_price - total_home_payment) *
-                   (1 - market_params.capital_gains_rate_percentage/100))
-    return home_profit - sellers_fee
+    home_profit = (home_sale_price - total_home_payment)
+
+    # We can keep up to |home_profit_tax_exclusion_amount| of the profit
+    # without taxation. The rest gets taxed at capital gains.
+    untaxed_home_profit = min(
+        home_profit, market_params.home_profit_tax_exclusion_amount)
+    taxed_home_profit = home_profit - untaxed_home_profit
+    adjusted_home_profit = (
+        untaxed_home_profit +
+        taxed_home_profit * (1 - market_params.capital_gains_rate_percentage/100))
+    return adjusted_home_profit - sellers_fee
 
 def get_monthly_rental_payments(market_params, home_params):
     # Return a generator for the monthly rental payment. Assume the rental
@@ -183,3 +211,37 @@ def home_vs_rental(
         net_profit_comparative_rental_scenario(
             market_params, loan_params, home_class_params, home_params,
             sell_month))
+
+def find_max_hoa(
+    market_params, loan_params, home_class_params, sell_month,
+    home_value, rental_monthly, min_hoa=0, max_hoa=3000):
+    # Finds the maximum HOA payment that would result in a net profit against
+    # renting at |rental_monthly|, for a fixed home value |home_value|. Returns
+    # None if no profitable HOA is possible.
+    assert min_hoa <= max_hoa
+
+    hp = params.HomeParams(
+        address='',
+        home_value=home_value,
+        hoa_monthly=0,
+        rental_monthly=rental_monthly)
+
+    if home_vs_rental(market_params, loan_params, home_class_params,
+                      hp._replace(hoa_monthly=min_hoa), sell_month) < 0:
+      return None
+
+    start = min_hoa
+    length = max_hoa - min_hoa + 1
+
+    while length > 1:
+        step = int(length/2)
+        cur = start + step
+        if home_vs_rental(market_params, loan_params, home_class_params,
+                          hp._replace(hoa_monthly=cur), sell_month) >= 0:
+            # cur is profitable. Pick the right side.
+            start = cur
+            length -= step
+        else:
+            # cur is not profitable. Pick the left side.
+            length = step
+    return start
