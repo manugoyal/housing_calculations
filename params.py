@@ -13,6 +13,7 @@ MarketParams = namedtuple(
         'stock_market_growth_percentage_annual',
         'capital_gains_rate_percentage',
         'home_profit_tax_exclusion_amount',
+        'downpayment_discount',
     ])
 
 # These paramaters pertain to a particular loan structure.
@@ -42,5 +43,6 @@ HomeParams = namedtuple(
         'home_value',
         'hoa_monthly',
         'rental_monthly',
+        'finishing_costs',
     ])
 

@@ -16,7 +16,7 @@ MortgagePayment = namedtuple(
 def get_loan_amount(loan_params, home_params):
     return min(
         loan_params.maximum_loan_amount,
-        (1 - loan_params.downpayment_percentage/100) * home_params.home_value)
+        (1 - loan_params.downpayment_percentage/100) * (home_params.home_value + home_params.finishing_costs))
 
 def get_mortgage_payments(market_params, loan_params, home_params):
     # Generator for mortgage payments. After the mortgage is paid off, returns
@@ -45,7 +45,9 @@ def appreciation_annual_to_monthly(annual_percentage):
 def get_initial_payment(market_params, loan_params, home_params):
     # Compute the initial payment for a particular home.
 
-    downpayment_amount = home_params.home_value - get_loan_amount(loan_params, home_params)
+    downpayment_amount = max(
+        0,
+        (home_params.home_value + home_params.finishing_costs) - get_loan_amount(loan_params, home_params) - market_params.downpayment_discount)
     buyers_fee = market_params.buyers_fee_percentage/100 * home_params.home_value
     return downpayment_amount + buyers_fee
 
@@ -67,11 +69,20 @@ def tax_adjusted_nonmortgage_monthly_payment(
             tax_deductable_property_tax *
                 (1 - market_params.marginal_tax_rate_percentage/100))
 
-def tax_adjusted_monthly_payments(
+def unadjusted_nonmortgage_monthly_payment(
     market_params, loan_params, home_class_params, home_params):
-    # Generator for the total monthly payment over time (mortgage +
-    # non-mortgage payments). Adjusts for tax-deductable portions of the
-    # payment.
+    property_tax = (market_params.property_tax_percentage_annual/100/12 *
+                    home_params.home_value)
+    home_insurance = (home_class_params.home_insurance_percentage_annual/100/12 *
+                      home_params.home_value)
+    maintenance = home_class_params.home_maintenance_annual/12
+    hoa = home_params.hoa_monthly
+    return property_tax + home_insurance + maintenance + hoa
+
+def tax_adjusted_mortgage_monthly_payments(
+    market_params, loan_params, home_class_params, home_params):
+    # Generator for the total monthly mortgage payment over time. Adjusts for
+    # tax-deductable portions of the payment.
 
     mortgage_payments = get_mortgage_payments(market_params, loan_params, home_params)
     indebtedness = get_loan_amount(loan_params, home_params)
@@ -88,12 +99,29 @@ def tax_adjusted_monthly_payments(
         remaining_interest = mortgage_payment.interest - tax_deductable_interest
         yield (
             mortgage_payment.principal +
-            tax_adjusted_nonmortgage_monthly_payment(
-                market_params, loan_params, home_class_params, home_params) +
             tax_deductable_interest *
                 (1 - market_params.marginal_tax_rate_percentage/100) +
             remaining_interest)
         indebtedness = max(0, indebtedness - mortgage_payment.principal)
+
+def tax_adjusted_monthly_payments(
+    market_params, loan_params, home_class_params, home_params):
+
+    mortgage_monthly_payments = tax_adjusted_monthly_payments(
+        market_params, loan_params, home_class_params, home_params)
+    nonmortgage_amount = tax_adjusted_nonmortgage_monthly_payment(
+        market_params, loan_params, home_class_params, home_params)
+    for mortgage_amount in mortgage_monthly_payments:
+        yield mortgage_amount + nonmortgage_amount
+
+def unadjusted_monthly_payments(
+    market_params, loan_params, home_class_params, home_params):
+    mortgage_payments = get_mortgage_payments(market_params, loan_params, home_params)
+    for mortgage_payment in mortgage_payments:
+        yield (
+            mortgage_payment.principal + mortgage_payment.interest +
+            unadjusted_nonmortgage_monthly_payment(
+                market_params, loan_params, home_class_params, home_params))
 
 def get_total_home_payment(
     market_params, loan_params, home_class_params, home_params, sell_month):
